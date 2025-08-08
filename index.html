@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="zh-Hans">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>我的离线笔记</title>
+
+    <!-- 链接到 manifest.json 文件 -->
+    <link rel="manifest" href="manifest.json">
+    
+    <!-- PWA meta 标签，定义应用的外观 -->
+    <meta name="theme-color" content="#3b82f6">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="mobile-web-app-status-bar-style" content="black-translucent">
+    <link rel="apple-touch-icon" href="https://placehold.co/192x192/000000/FFFFFF?text=PWA">
+
+    <!-- 引入 Tailwind CSS 以美化界面 -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body { font-family: 'Inter', sans-serif; }
+        .no-scrollbar::-webkit-scrollbar { display: none; }
+        .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+    </style>
+</head>
+<body class="bg-gray-900 text-gray-100 p-4 sm:p-6 md:p-8 flex flex-col items-center min-h-screen">
+
+    <div class="w-full max-w-2xl bg-gray-800 p-6 rounded-3xl shadow-xl flex flex-col gap-6">
+        <h1 class="text-3xl sm:text-4xl font-bold text-center text-blue-400 mb-4">
+            我的离线笔记
+        </h1>
+
+        <!-- 笔记输入区 -->
+        <div class="flex flex-col gap-4">
+            <textarea id="note-input" rows="4" class="w-full p-4 text-sm sm:text-base rounded-2xl bg-gray-700 text-gray-200 border-none focus:ring-2 focus:ring-blue-500 focus:outline-none placeholder-gray-400" placeholder="写下您的笔记..."></textarea>
+            <button id="save-btn" class="w-full px-6 py-3 bg-blue-600 hover:bg-blue-500 text-white font-semibold rounded-2xl shadow-lg transition duration-200 ease-in-out transform hover:scale-105 active:scale-95">
+                保存笔记
+            </button>
+        </div>
+
+        <!-- 笔记列表区 -->
+        <div class="mt-8">
+            <h2 class="text-2xl font-semibold mb-4 text-blue-300">已保存的笔记</h2>
+            <div id="notes-container" class="flex flex-col gap-4 overflow-y-auto max-h-96 no-scrollbar">
+                <!-- 笔记将通过 JavaScript 动态加载到这里 -->
+                <p id="loading-text" class="text-gray-400 text-center">加载中...</p>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', () => {
+            const noteInput = document.getElementById('note-input');
+            const saveBtn = document.getElementById('save-btn');
+            const notesContainer = document.getElementById('notes-container');
+            const loadingText = document.getElementById('loading-text');
+
+            // 数据库名称和版本
+            const DB_NAME = 'MyOfflineNotesDB';
+            const DB_VERSION = 1;
+            const STORE_NAME = 'notes';
+            
+            let db;
+
+            // 注册 Service Worker
+            if ('serviceWorker' in navigator) {
+                window.addEventListener('load', () => {
+                    navigator.serviceWorker.register('service-worker.js').then(registration => {
+                        console.log('Service Worker registration successful:', registration.scope);
+                    }).catch(err => {
+                        console.log('Service Worker registration failed:', err);
+                    });
+                });
+            }
+
+            // 打开或创建 IndexedDB 数据库
+            function openDatabase() {
+                return new Promise((resolve, reject) => {
+                    const request = indexedDB.open(DB_NAME, DB_VERSION);
+
+                    // 数据库版本升级事件，用于创建对象仓库
+                    request.onupgradeneeded = event => {
+                        db = event.target.result;
+                        if (!db.objectStoreNames.contains(STORE_NAME)) {
+                            // 创建对象仓库，指定主键为 'id'，且自动递增
+                            const objectStore = db.createObjectStore(STORE_NAME, { keyPath: 'id', autoIncrement: true });
+                            // 创建一个索引以便按时间戳排序
+                            objectStore.createIndex('timestamp', 'timestamp', { unique: false });
+                        }
+                    };
+
+                    // 数据库打开成功事件
+                    request.onsuccess = event => {
+                        db = event.target.result;
+                        console.log('数据库已打开:', db.name);
+                        resolve(db);
+                    };
+
+                    // 数据库打开失败事件
+                    request.onerror = event => {
+                        console.error('数据库打开失败:', event.target.error);
+                        reject(event.target.error);
+                    };
+                });
+            }
+
+            // 保存笔记到数据库
+            async function saveNote(note) {
+                if (!db) db = await openDatabase();
+                
+                const transaction = db.transaction([STORE_NAME], 'readwrite');
+                const objectStore = transaction.objectStore(STORE_NAME);
+                
+                const request = objectStore.add({
+                    content: note,
+                    timestamp: Date.now()
+                });
+
+                return new Promise((resolve, reject) => {
+                    request.onsuccess = () => resolve();
+                    request.onerror = event => reject(event.target.error);
+                });
+            }
+
+            // 从数据库加载笔记
+            async function loadNotes() {
+                if (!db) db = await openDatabase();
+
+                const transaction = db.transaction([STORE_NAME], 'readonly');
+                const objectStore = transaction.objectStore(STORE_NAME);
+                
+                const notes = [];
+                // 获取按时间戳降序排序的索引
+                const index = objectStore.index('timestamp');
+                const request = index.openCursor(null, 'prev');
+
+                return new Promise((resolve, reject) => {
+                    request.onsuccess = event => {
+                        const cursor = event.target.result;
+                        if (cursor) {
+                            notes.push(cursor.value);
+                            cursor.continue();
+                        } else {
+                            resolve(notes);
+                        }
+                    };
+                    request.onerror = event => reject(event.target.error);
+                });
+            }
+
+            // 删除笔记
+            async function deleteNote(id) {
+                if (!db) db = await openDatabase();
+
+                const transaction = db.transaction([STORE_NAME], 'readwrite');
+                const objectStore = transaction.objectStore(STORE_NAME);
+
+                const request = objectStore.delete(Number(id));
+
+                return new Promise((resolve, reject) => {
+                    request.onsuccess = () => resolve();
+                    request.onerror = event => reject(event.target.error);
+                });
+            }
+
+            // 渲染笔记列表
+            function renderNotes(notes) {
+                notesContainer.innerHTML = '';
+                if (notes.length === 0) {
+                    notesContainer.innerHTML = '<p class="text-gray-400 text-center">还没有笔记。快来写第一条吧！</p>';
+                    return;
+                }
+                
+                notes.forEach(note => {
+                    const noteElement = document.createElement('div');
+                    noteElement.className = 'bg-gray-700 p-4 rounded-xl flex justify-between items-start shadow-md';
+                    noteElement.innerHTML = `
+                        <p class="text-gray-200 text-sm sm:text-base pr-4 break-words whitespace-pre-wrap">${note.content}</p>
+                        <button class="delete-btn text-gray-400 hover:text-red-400 transition-colors" data-id="${note.id}" aria-label="删除笔记">
+                            <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+                                <path fill-rule="evenodd" d="M9 2a1 1 0 00-.894.553L7.382 4H4a1 1 0 000 2v10a2 2 0 002 2h8a2 2 0 002-2V6a1 1 0 100-2h-3.382l-.728-1.447A1 1 0 0011 2H9zM7 8a1 1 0 012 0v6a1 1 0 11-2 0V8zm6 0a1 1 0 112 0v6a1 1 0 11-2 0V8z" clip-rule="evenodd" />
+                            </svg>
+                        </button>
+                    `;
+                    notesContainer.appendChild(noteElement);
+                });
+            }
+
+            // 初始化应用
+            async function initializeApp() {
+                loadingText.classList.remove('hidden');
+                try {
+                    await openDatabase();
+                    const notes = await loadNotes();
+                    renderNotes(notes);
+                } catch (e) {
+                    console.error('应用初始化失败:', e);
+                    notesContainer.innerHTML = `<p class="text-red-400 text-center">应用加载失败，请检查控制台错误。</p>`;
+                } finally {
+                    loadingText.classList.add('hidden');
+                }
+            }
+            
+            saveBtn.addEventListener('click', async () => {
+                const noteContent = noteInput.value.trim();
+                if (noteContent) {
+                    await saveNote(noteContent);
+                    noteInput.value = '';
+                    const notes = await loadNotes();
+                    renderNotes(notes);
+                }
+            });
+
+            notesContainer.addEventListener('click', async (event) => {
+                if (event.target.closest('.delete-btn')) {
+                    const deleteButton = event.target.closest('.delete-btn');
+                    const noteId = deleteButton.dataset.id;
+                    await deleteNote(noteId);
+                    const notes = await loadNotes();
+                    renderNotes(notes);
+                }
+            });
+
+            initializeApp();
+        });
+    </script>
+</body>
+</html>
